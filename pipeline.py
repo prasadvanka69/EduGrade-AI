@@ -44,6 +44,7 @@ class RubricCriterion(BaseModel):
 
 
 class RubricDecomposition(BaseModel):
+
     model_config = ConfigDict(extra="ignore")
 
     assignment_type: Literal[
@@ -56,6 +57,7 @@ class RubricDecomposition(BaseModel):
     ]
 
     assignment_summary: str
+
     criteria: list[RubricCriterion]
 
     @field_validator("criteria")
@@ -64,14 +66,27 @@ class RubricDecomposition(BaseModel):
         cls,
         value: list[RubricCriterion],
     ) -> list[RubricCriterion]:
+
         if len(value) != 4:
-            raise ValueError("rubric must contain exactly 4 criteria")
+            raise ValueError(
+                "Rubric must contain exactly 4 criteria"
+            )
 
         if any(c.max_score <= 0 for c in value):
-            raise ValueError("criterion scores must be positive")
+            raise ValueError(
+                "Each criterion score must be positive"
+            )
 
-        if any(c.max_score != 25 for c in value):
-            raise ValueError("each criterion must have exactly 25 points")
+        total = round(
+            sum(c.max_score for c in value),
+            2,
+        )
+
+        if total != 100:
+            raise ValueError(
+                f"Total rubric score must equal 100, got {total}"
+            )
+
         return value
 
 

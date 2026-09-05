@@ -13,15 +13,19 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from pipeline import PipelineError, PipelineResult, RubricDecomposition, generate_rubric, run_pipeline
-
 load_dotenv()
 
 # Load API keys from Streamlit Cloud Secrets if available
-if "GOOGLE_API_KEY" in st.secrets:
-    os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+try:
+    if "GOOGLE_API_KEY" in st.secrets:
+        os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
 
-if "GROQ_API_KEY" in st.secrets:
-    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    if "GROQ_API_KEY" in st.secrets:
+        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+
+except Exception:
+    # Local development: use .env file
+    pass
 
 st.set_page_config(
     page_title="EduGrade AI  Assessment & Feedback Agent",
