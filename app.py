@@ -4,7 +4,7 @@ database.init_database()
 import json
 import os
 from copy import deepcopy
-
+import chromadb
 import database
 database.init_database()
 import vector_db
