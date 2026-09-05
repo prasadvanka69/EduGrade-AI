@@ -20,9 +20,15 @@ load_dotenv()
 # Current, runnable defaults as of Sep 2026.
 # You can override these in .env without changing code.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-GROQ_SCORING_MODEL = os.getenv("GROQ_SCORING_MODEL", "llama-3.3-70b-versatile")
-GROQ_ANOMALY_MODEL = os.getenv("GROQ_ANOMALY_MODEL", "llama-3.1-8b-instant")
+GROQ_SCORING_MODEL = os.getenv(
+    "GROQ_SCORING_MODEL",
+    "openai/gpt-oss-120b"
+)
 
+GROQ_ANOMALY_MODEL = os.getenv(
+    "GROQ_ANOMALY_MODEL",
+    "openai/gpt-oss-20b"
+)
 
 class PipelineError(RuntimeError):
     """Human-readable pipeline failure."""
