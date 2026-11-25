@@ -1,155 +1,242 @@
-﻿from __future__ import annotations
-import database
-database.init_database()
-import json
+from __future__ import annotations
+
 import os
 from copy import deepcopy
-import chromadb
-import database
-database.init_database()
-import vector_db
+from html import escape
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from pipeline import PipelineError, PipelineResult, RubricDecomposition, generate_rubric, run_pipeline
-load_dotenv()
+import database
+from pipeline import (
+    PipelineError,
+    PipelineResult,
+    RubricDecomposition,
+    generate_rubric_with_status,
+    run_pipeline,
+)
 
+load_dotenv()
+database.init_database()
 
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
-
     if "GROQ_API_KEY" in st.secrets:
         os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-
 except Exception:
-    # Local development: use .env file
+    # Local development: keys come from the .env file.
     pass
 
 st.set_page_config(
-    page_title="EduGrade AI  Assessment & Feedback Agent",
-    page_icon="",
+    page_title="EduGrade",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-st.markdown(
-    """
+STYLE = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400&family=Source+Serif+4:opsz,wght@8..60,400&display=swap');
+
 :root {
-  --ink: #172033;
-  --muted: #5d6b82;
-  --blue: #355f8a;
-  --blue-2: #4f7ea8;
-  --slate: #eef3f7;
-  --warm: #fbf8f3;
-  --line: #dce5ec;
-  --good: #2f7d5a;
-  --warn: #a66a1f;
-  --bad: #a24545;
+  --paper: #f4f5f3;
+  --surface: #ffffff;
+  --ink: #1c2428;
+  --muted: #5b676d;
+  --faint: #8a949a;
+  --rule: #d8dddf;
+  --accent: #1d4b5c;
+  --accent-soft: #e4edf0;
+  --good: #2f6b4f;
+  --mid: #8a6a1e;
+  --low: #8c4a3f;
+  --serif: 'Source Serif 4', 'Iowan Old Style', Georgia, serif;
+  --sans: 'Public Sans', 'Helvetica Neue', Arial, sans-serif;
 }
-.stApp {
-  background:
-    radial-gradient(circle at 8% 0%, rgba(79,126,168,.10), transparent 26%),
-    linear-gradient(180deg, #fbfcfd 0%, #f6f8fa 100%);
+
+html, body, .stApp, [class*="css"] {
+  font-family: var(--sans);
+  color: var(--ink);
 }
-.block-container {padding-top: 1.5rem; max-width: 1450px;}
-h1, h2, h3 {color: var(--ink); letter-spacing: -0.02em;}
-[data-testid="stSidebar"] {
-  background: linear-gradient(180deg, #172033 0%, #223149 100%);
+.stApp { background: var(--paper); }
+header[data-testid="stHeader"] { background: transparent; }
+#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none; }
+.block-container { max-width: 1180px; padding: 2.2rem 2rem 6rem; }
+
+/* No bold anywhere: hierarchy comes from size, colour and space. */
+*, b, strong, h1, h2, h3, h4, h5, h6, label, button, th, summary,
+[data-testid="stMarkdownContainer"] strong {
+  font-weight: 400 !important;
 }
-[data-testid="stSidebar"] * {color: #f4f7fa;}
-[data-testid="stSidebar"] input {
-  color: #172033 !important;
-  background: #f9fbfc !important;
+
+h1, h2, h3, h4 { font-family: var(--serif); color: var(--ink); letter-spacing: -0.01em; }
+h3 { font-size: 1.45rem; line-height: 1.25; margin: 0 0 .25rem; padding: 0; }
+p, li { line-height: 1.6; }
+
+/* Masthead */
+.mast { display: flex; align-items: baseline; justify-content: space-between;
+        gap: 2rem; padding-bottom: 1.1rem; margin-bottom: .4rem;
+        border-bottom: 1px solid var(--ink); }
+.mast .name { font-family: var(--serif); font-size: 1.9rem; letter-spacing: -0.02em; }
+.mast .line { color: var(--muted); font-size: .92rem; max-width: 34rem; text-align: right; }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] { gap: 2rem; border-bottom: 1px solid var(--rule); }
+.stTabs [data-baseweb="tab-border"] { display: none; }
+.stTabs button[data-baseweb="tab"] { padding: .9rem 0; height: auto; background: transparent;
+  color: var(--muted); font-size: .98rem; }
+.stTabs button[data-baseweb="tab"][aria-selected="true"] { color: var(--ink); }
+.stTabs [data-baseweb="tab-highlight"] { background: var(--accent); height: 2px; }
+.stTabs [data-baseweb="tab-panel"] { padding-top: 2rem; }
+
+/* Sections */
+.section { margin: 2.6rem 0 1rem; padding-top: 1.2rem; border-top: 1px solid var(--rule); }
+.section.first { border-top: 0; margin-top: 0; padding-top: 0; }
+.section h3 { margin: 0; }
+.section p { color: var(--muted); margin: .3rem 0 0; font-size: .93rem; max-width: 42rem; }
+
+/* Inputs */
+label, [data-testid="stWidgetLabel"] p { font-size: .86rem !important; color: var(--muted) !important; }
+.stTextInput input, .stTextArea textarea, .stNumberInput input,
+[data-baseweb="select"] > div {
+  background: var(--surface) !important; border: 1px solid var(--rule) !important;
+  border-radius: 3px !important; color: var(--ink) !important; font-family: var(--sans) !important;
+  box-shadow: none !important;
 }
-.hero {
-  background: linear-gradient(135deg, #243b55, #355f8a);
-  color: white;
-  border-radius: 22px;
-  padding: 26px 30px;
-  box-shadow: 0 14px 38px rgba(31, 52, 76, .18);
-  margin-bottom: 18px;
+.stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
+  border-color: var(--accent) !important; outline: 2px solid var(--accent-soft) !important;
 }
-.hero h1 {color: white; margin: 0 0 4px 0; font-size: 2rem;}
-.hero p {color: #dce9f5; margin: 0; max-width: 900px;}
-.agent-card, .score-card, .alert-card, .report-card {
-  background: rgba(255,255,255,.94);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: 18px 20px;
-  box-shadow: 0 7px 22px rgba(37,56,78,.06);
+.stTextArea textarea { line-height: 1.55; }
+[data-testid="stFileUploaderDropzone"] {
+  background: var(--surface); border: 1px dashed #b7c0c4; border-radius: 3px;
 }
-.pipeline {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(120px, 1fr));
-  gap: 8px;
-  margin: 12px 0 20px 0;
+[data-testid="stFileUploaderDropzone"] button { border-radius: 3px; }
+
+/* Buttons */
+.stButton > button, .stDownloadButton > button {
+  border-radius: 3px; padding: .55rem 1.2rem; font-size: .95rem;
+  border: 1px solid var(--ink); background: transparent; color: var(--ink);
+  transition: background .15s, color .15s;
 }
-.pipe-step {
-  border-radius: 14px;
-  border: 1px solid #dce5ec;
-  background: white;
-  padding: 12px 10px;
-  text-align: center;
-  font-size: .84rem;
-  color: #526177;
-}
-.pipe-step.done {
-  background: #edf7f2;
-  border-color: #bcdcca;
-  color: #286447;
-  font-weight: 700;
-}
-.pipe-step.active {
-  background: #eaf2fa;
-  border-color: #a9c5dd;
-  color: #294f72;
-  font-weight: 700;
-}
-.pipe-step.halt {
-  background: #fff2ef;
-  border-color: #edc0ba;
-  color: #8e3f37;
-  font-weight: 700;
-}
-.badge {
-  display:inline-block; padding:5px 10px; border-radius:999px;
-  font-weight:700; font-size:.78rem;
-}
-.badge-strong {background:#e5f4eb; color:#286447;}
-.badge-partial {background:#fff2d9; color:#855a18;}
-.badge-limited {background:#fde9d8; color:#95531e;}
-.badge-none {background:#f8dfdf; color:#923d3d;}
-.score-big {font-size: 2.5rem; font-weight: 800; color:#294f72; line-height:1;}
-.muted {color:#69778d;}
-.smallcaps {font-size:.75rem; letter-spacing:.08em; text-transform:uppercase; font-weight:800; color:#65748a;}
-div[data-testid="stMetric"] {
-  background:white; border:1px solid var(--line); border-radius:16px; padding:12px 14px;
-}
-.stButton > button {
-  border-radius: 12px;
-  font-weight: 700;
-}
+.stButton > button:hover { background: var(--ink); color: #fff; border-color: var(--ink); }
+.stButton > button[kind="primary"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.stButton > button[kind="primary"]:hover { background: #163b49; border-color: #163b49; }
+.stButton > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Pipeline track */
+.track { display: grid; grid-template-columns: repeat(6, 1fr); margin: 1.2rem 0 .6rem; }
+.stop { position: relative; padding-top: 1.35rem; font-size: .85rem; color: var(--faint); }
+.stop::before { content: ""; position: absolute; top: .42rem; left: 0; right: 0;
+  height: 1px; background: var(--rule); }
+.stop::after { content: ""; position: absolute; top: 0; left: 0; width: .85rem; height: .85rem;
+  border-radius: 50%; background: var(--paper); border: 1px solid #aab4b9; box-sizing: border-box; }
+.stop.done { color: var(--ink); }
+.stop.done::before { background: var(--accent); }
+.stop.done::after { background: var(--accent); border-color: var(--accent); }
+.stop.active { color: var(--accent); }
+.stop.active::after { border: 3px solid var(--accent); background: var(--paper); }
+.stop.halt { color: var(--low); }
+.stop.halt::after { background: var(--low); border-color: var(--low); }
+.log { color: var(--muted); font-size: .88rem; line-height: 1.7; margin: .4rem 0 0; }
+.log div::before { content: "-"; margin-right: .6rem; color: var(--faint); }
+
+/* Notes (replace default coloured alert boxes) */
+.note { border-left: 2px solid var(--accent); background: var(--surface);
+  padding: .8rem 1.1rem; margin: .8rem 0; font-size: .93rem; color: var(--ink); }
+.note.warn { border-color: var(--mid); }
+.note.error { border-color: var(--low); }
+.note.good { border-color: var(--good); }
+.note .t { color: var(--muted); display: block; font-size: .84rem; margin-bottom: .15rem; }
+
+/* Score block */
+.scorehead { display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 3rem; align-items: start; }
+.bigscore { font-family: var(--serif); font-size: 6.2rem; line-height: .95; letter-spacing: -0.04em; }
+.bigscore small { font-size: 1.1rem; color: var(--faint); letter-spacing: 0; margin-left: .35rem; }
+.level { color: var(--accent); font-size: 1.05rem; margin-top: .6rem; }
+.summary { font-family: var(--serif); font-size: 1.22rem; line-height: 1.65; max-width: 40rem; margin: 0; }
+
+/* Ledger */
+.ledger { margin-top: .4rem; }
+.ledger-row { display: grid; grid-template-columns: minmax(150px, 1.1fr) 2fr 86px;
+  gap: 1.6rem; align-items: center; padding: 1.05rem 0; border-bottom: 1px solid var(--rule); }
+.ledger-row:first-child { border-top: 1px solid var(--ink); }
+.l-name { font-family: var(--serif); font-size: 1.08rem; }
+.l-level { font-family: var(--sans); font-size: .82rem; color: var(--muted); margin-top: .15rem; }
+.l-level i { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%;
+  margin-right: .45rem; background: var(--faint); }
+.l-level.Strong i { background: var(--good); }
+.l-level.Partial i { background: var(--mid); }
+.l-level.Limited i, .l-level.Not i { background: var(--low); }
+.l-bar { height: 3px; background: var(--rule); position: relative; }
+.l-bar span { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+.l-score { text-align: right; font-family: var(--serif); font-size: 1.35rem; }
+.l-score small { color: var(--faint); font-size: .85rem; }
+.l-detail { grid-column: 1 / -1; color: var(--muted); font-size: .92rem; max-width: 46rem; margin-top: -.5rem; }
+
+/* Lists */
+.plain { margin: .3rem 0 0; padding: 0; list-style: none; }
+.plain li { padding: .65rem 0 .65rem 1rem; border-left: 1px solid var(--rule); margin-bottom: .35rem; }
+.steps { margin: .3rem 0 0; padding-left: 1.3rem; }
+.steps li { padding: .3rem 0 .3rem .3rem; }
+.sub { font-family: var(--serif); font-size: 1.12rem; margin: 1.6rem 0 .3rem; }
+
+/* Review rows */
+.review-head { font-family: var(--serif); font-size: 1.12rem; margin-bottom: .1rem; }
+.review-meta { color: var(--muted); font-size: .82rem; margin-bottom: .5rem; }
+.review-text { color: var(--ink); font-size: .93rem; margin: 0 0 .35rem; }
+.review-fix { color: var(--muted); font-size: .9rem; margin: 0; }
+.total { font-family: var(--serif); font-size: 2.6rem; letter-spacing: -0.02em; }
+.total small { font-size: 1rem; color: var(--faint); }
+
+/* Archive */
+.arch-head, .arch-row { display: grid; grid-template-columns: 56px 1.4fr 1.8fr 1.1fr 90px 1.2fr; gap: 1rem;
+  padding: .75rem 0; align-items: baseline; font-size: .92rem; }
+.arch-head { color: var(--muted); font-size: .82rem; border-bottom: 1px solid var(--ink); }
+.arch-row { border-bottom: 1px solid var(--rule); }
+.arch-row .n { font-family: var(--serif); }
+
+[data-testid="stExpander"] { border: 0; border-top: 1px solid var(--rule); border-radius: 0; background: transparent; margin-top: 1.2rem; }
+[data-testid="stExpander"] details { border: 0 !important; border-radius: 0 !important; }
+.log { margin-bottom: 1.2rem; }
+[data-testid="stExpander"] summary { padding-left: 0; }
+[data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--rule); }
+.empty { color: var(--muted); padding: 2.5rem 0; max-width: 34rem; }
+.empty .h { font-family: var(--serif); font-size: 1.35rem; color: var(--ink); margin-bottom: .3rem; }
+
 @media (max-width: 900px) {
-  .pipeline {grid-template-columns: repeat(2, 1fr);}
+  .block-container { padding: 1.4rem 1rem 4rem; }
+  .mast { flex-direction: column; gap: .4rem; }
+  .mast .line { text-align: left; }
+  .track { grid-template-columns: repeat(3, 1fr); row-gap: 1rem; }
+  .scorehead { grid-template-columns: 1fr; gap: 1.2rem; }
+  .bigscore { font-size: 4.6rem; }
+  .ledger-row { grid-template-columns: 1fr 70px; gap: .6rem 1rem; }
+  .l-bar { grid-column: 1 / -1; order: 3; }
+  .arch-head { display: none; }
+  .arch-row { grid-template-columns: 44px 1fr 1fr; }
 }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+"""
+st.markdown(STYLE, unsafe_allow_html=True)
 
 PIPE_STEPS = [
-    ("intake", "1  Intake"),
-    ("identify", "2  Decompose"),
-    ("anomaly", "3  Anomaly"),
-    ("analyze", "4  Parallel Score"),
-    ("generate", "5  Feedback"),
-    ("approval", "6  Approval"),
+    ("intake", "Intake"),
+    ("identify", "Rubric"),
+    ("anomaly", "Integrity check"),
+    ("analyze", "Scoring"),
+    ("generate", "Feedback"),
+    ("approval", "Teacher review"),
 ]
 
+STATUS_LABELS = {
+    "awaiting_teacher_review": "Awaiting review",
+    "halted_for_review": "Halted for review",
+    "approved": "Approved",
+}
 
+
+# ---------------------------------------------------------------- helpers
 def init_state():
     defaults = {
         "result": None,
@@ -160,37 +247,157 @@ def init_state():
         "pipeline_halted": False,
         "generated_rubric": None,
         "rubric_text": "",
+        "rubric_editor": "",
+        "rubric_notice": None,
+        "selected_history": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-def render_pipeline():
+def esc(value) -> str:
+    return escape(str(value if value is not None else ""))
+
+
+def fmt(value) -> str:
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return esc(value)
+
+
+def note(text: str, tone: str = "info", title: str = "") -> None:
+    head = f'<span class="t">{esc(title)}</span>' if title else ""
+    st.markdown(
+        f'<div class="note {tone}">{head}{esc(text)}</div>', unsafe_allow_html=True
+    )
+
+
+def section(title: str, blurb: str = "", first: bool = False) -> None:
+    sub = f"<p>{esc(blurb)}</p>" if blurb else ""
+    cls = "section first" if first else "section"
+    st.markdown(
+        f'<div class="{cls}"><h3>{esc(title)}</h3>{sub}</div>', unsafe_allow_html=True
+    )
+
+
+def level_for(total: float) -> str:
+    if total >= 90:
+        return "Excellent"
+    if total >= 75:
+        return "Proficient"
+    if total >= 60:
+        return "Developing"
+    return "Beginning"
+
+
+def level_class(compliance: str) -> str:
+    return compliance.split()[0] if compliance else "Partial"
+
+
+def render_track() -> None:
     done = {e["step"] for e in st.session_state.events}
     active = st.session_state.active_step
-    html = ['<div class="pipeline">']
+    parts = ['<div class="track">']
     for step, label in PIPE_STEPS:
-        cls = "pipe-step"
+        cls = "stop"
         if st.session_state.pipeline_halted and step == "approval":
             cls += " halt"
         elif step == active:
             cls += " active"
         elif step in done:
             cls += " done"
-        html.append(f'<div class="{cls}">{label}</div>')
+        parts.append(f'<div class="{cls}">{label}</div>')
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def render_log(container) -> None:
+    lines = "".join(f"<div>{esc(e['message'])}</div>" for e in st.session_state.events)
+    container.markdown(f'<div class="log">{lines}</div>', unsafe_allow_html=True)
+
+
+def render_ledger(rows: list[dict], with_detail: bool = False) -> None:
+    """rows: criterion, score, max_score, compliance, rationale (optional)."""
+    html = ['<div class="ledger">']
+    for row in rows:
+        max_score = float(row["max_score"]) or 1.0
+        pct = max(0.0, min(100.0, float(row["score"]) / max_score * 100))
+        comp = row.get("compliance") or ""
+        html.append(
+            '<div class="ledger-row">'
+            f'<div><div class="l-name">{esc(row["criterion"])}</div>'
+            f'<div class="l-level {level_class(comp)}"><i></i>{esc(comp)}</div></div>'
+            f'<div class="l-bar"><span style="width:{pct:.1f}%"></span></div>'
+            f'<div class="l-score">{fmt(row["score"])}<small> / {fmt(max_score)}</small></div>'
+            + (
+                f'<div class="l-detail">{esc(row.get("rationale", ""))}</div>'
+                if with_detail and row.get("rationale")
+                else ""
+            )
+            + "</div>"
+        )
     html.append("</div>")
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def compliance_badge(value: str) -> str:
-    css = {
-        "Strong": "badge-strong",
-        "Partial": "badge-partial",
-        "Limited": "badge-limited",
-        "Not Demonstrated": "badge-none",
-    }.get(value, "badge-partial")
-    return f'<span class="badge {css}">{value}</span>'
+def plain_list(items: list[str]) -> None:
+    body = "".join(f"<li>{esc(i)}</li>" for i in items)
+    st.markdown(f'<ul class="plain">{body}</ul>', unsafe_allow_html=True)
+
+
+def max_by_name(report: dict) -> dict[str, float]:
+    return {c["name"]: c["max_score"] for c in report["rubric"]["criteria"]}
+
+
+def render_report(report: dict) -> None:
+    feedback = report["feedback"]
+    limits = max_by_name(report)
+    rows = [
+        {
+            "criterion": s["criterion"],
+            "score": s["score"],
+            "max_score": limits.get(s["criterion"], 25),
+            "compliance": s["compliance"],
+            "rationale": s["rationale"],
+        }
+        for s in report["scores"]
+    ]
+
+    st.markdown(
+        '<div class="scorehead"><div>'
+        f'<div class="bigscore">{fmt(feedback["total_score"])}<small>out of 100</small></div>'
+        f'<div class="level">{esc(feedback["overall_level"])}</div></div>'
+        f'<p class="summary">{esc(feedback["summary"])}</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    section("Marks by criterion")
+    render_ledger(rows, with_detail=True)
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown('<div class="sub">What worked</div>', unsafe_allow_html=True)
+        plain_list(feedback["strengths"])
+    with right:
+        st.markdown('<div class="sub">Where to focus</div>', unsafe_allow_html=True)
+        plain_list(feedback["growth_priorities"])
+
+    st.markdown('<div class="sub">For the next attempt</div>', unsafe_allow_html=True)
+    steps = "".join(f"<li>{esc(i)}</li>" for i in feedback["next_steps"])
+    st.markdown(f'<ol class="steps">{steps}</ol>', unsafe_allow_html=True)
+
+    evidence = [
+        (s["criterion"], s.get("evidence_from_submission") or [])
+        for s in report["scores"]
+    ]
+    if any(e for _, e in evidence):
+        with st.expander("Passages the marks are based on"):
+            for name, quotes in evidence:
+                if quotes:
+                    st.markdown(f'<div class="sub">{esc(name)}</div>', unsafe_allow_html=True)
+                    plain_list(quotes)
 
 
 def safe_text_file(uploaded_file) -> str:
@@ -204,103 +411,57 @@ def safe_text_file(uploaded_file) -> str:
 
 init_state()
 
+# ---------------------------------------------------------------- keys
 with st.sidebar:
-
-    st.markdown("## 🎓 EduGrade AI")
-
-    st.caption("AI-Powered Assessment Platform")
-
-    st.divider()
-
-    st.markdown("### ⚙️ Settings")
-
-    with st.expander("API Configuration", expanded=False):
-
-        google_key = st.text_input(
-            "Google API Key",
-            type="password",
-            value="",
-            placeholder="Uses .env automatically if empty",
-            key="sidebar_google_key",
-        )
-
-        groq_key = st.text_input(
-            "Groq API Key",
-            type="password",
-            value="",
-            placeholder="Uses .env automatically if empty",
-            key="sidebar_groq_key",
-        )
-
-        has_google = bool(
-            google_key
-            or os.getenv("GOOGLE_API_KEY")
-            or os.getenv("GEMINI_API_KEY")
-        )
-
-        has_groq = bool(
-            groq_key
-            or os.getenv("GROQ_API_KEY")
-        )
-
-        if has_google:
-            st.success("Google AI connected")
-        else:
-            st.warning("Google AI key missing")
-
-        if has_groq:
-            st.success("Groq AI connected")
-        else:
-            st.warning("Groq AI key missing")
-
-    st.divider()
-
-    st.caption(
-        "Teacher-controlled AI assessment and feedback."
+    st.markdown('<div class="sub" style="margin-top:0">API keys</div>', unsafe_allow_html=True)
+    st.caption("Leave blank to use the keys in your .env file or Streamlit secrets.")
+    google_key = st.text_input(
+        "Google API key", type="password", key="sidebar_google_key"
     )
+    groq_key = st.text_input("Groq API key", type="password", key="sidebar_groq_key")
+
+    has_google = bool(
+        google_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    )
+    has_groq = bool(groq_key or os.getenv("GROQ_API_KEY"))
+    st.caption(f"Google: {'available' if has_google else 'missing'}")
+    st.caption(f"Groq: {'available' if has_groq else 'missing'}")
+
+# ---------------------------------------------------------------- masthead
 st.markdown(
-    """
-<div class="hero">
-  <div class="smallcaps" style="color:#bcd4e8">Assessment & Feedback Agent</div>
-  <h1>Explainable grading, with a teacher in control.</h1>
-  <p>Multimodal intake, structured rubric decomposition, anomaly routing,
-  parallel criterion scoring, actionable feedback, and an auditable approval queue.</p>
-</div>
-""",
+    '<div class="mast"><div class="name">EduGrade</div>'
+    '<div class="line">Rubric-based marking and written feedback. '
+    "Nothing reaches a student until a teacher approves it.</div></div>",
     unsafe_allow_html=True,
 )
 
-teacher_tab, student_tab, history_tab = st.tabs(
-    [
-        " Teacher Console",
-        " Student Report",
-        " Previous Submissions"
-    ]
-)
+grade_tab, report_tab, archive_tab = st.tabs(["Grade", "Student report", "Archive"])
 
-with teacher_tab:
-    st.subheader("Assignment setup")
-    left, right = st.columns([1, 1])
-    student_name = st.text_input(
-        "Student name",
-        placeholder="Enter student name",
+# ================================================================ GRADE
+with grade_tab:
+    section(
+        "Assignment",
+        "Describe the task and agree the rubric. The generated rubric can be edited before marking.",
+        first=True,
     )
 
-    assignment_title = st.text_input(
-        "Assignment title",
-        placeholder="e.g. Photosynthesis Essay",
-    )
+    meta_l, meta_r = st.columns(2, gap="large")
+    with meta_l:
+        student_name = st.text_input("Student name", placeholder="Full name")
+    with meta_r:
+        assignment_title = st.text_input(
+            "Assignment title", placeholder="Photosynthesis essay"
+        )
 
+    left, right = st.columns(2, gap="large")
     with left:
         assignment_prompt = st.text_area(
-            "Essay / assignment prompt",
-            height=150,
-            placeholder="Example: Write a 700-word argumentative essay on whether social media improves civic participation...",
+            "Assignment prompt",
+            height=230,
+            placeholder="Write a 700-word argumentative essay on whether social media improves civic participation.",
         )
         prompt_file = st.file_uploader(
-            "Or upload the prompt (.txt / .md)",
-            type=["txt", "md"],
-            key="prompt_file",
+            "Or upload the prompt (.txt or .md)", type=["txt", "md"], key="prompt_file"
         )
         uploaded_prompt_text = safe_text_file(prompt_file)
 
@@ -309,239 +470,241 @@ with teacher_tab:
     )
 
     with right:
-        st.markdown("### AI-generated rubric")
-        st.caption("Generate a rubric from the assignment prompt. You can edit it before assessment.")
-
-        generate_clicked = st.button(
-            "? Generate rubric with AI",
-            use_container_width=True,
-        )
+        generate_clicked = st.button("Generate rubric from prompt")
 
         if generate_clicked:
             if not effective_prompt.strip():
-                st.error("Enter or upload an assignment prompt first.")
+                st.session_state.rubric_notice = (
+                    "error",
+                    "Add an assignment prompt first, then generate the rubric.",
+                )
             else:
-                st.info("Starting rubric generation...")
-                with st.spinner("Generating rubric..."):
+                with st.spinner("Writing the rubric"):
                     try:
-                        st.info("Calling rubric generator...")
-                        generated = generate_rubric(
+                        generated, problem = generate_rubric_with_status(
                             assignment_prompt=effective_prompt,
                             teacher_rubric=st.session_state.rubric_text,
                             google_api_key=google_key,
                         )
                         st.session_state.generated_rubric = generated.model_dump()
-
-                        generated_text = "\n".join(
+                        text = "\n".join(
                             f"{c.name} ({c.max_score:g}/100): {c.description}"
                             for c in generated.criteria
                         )
-
-                        st.session_state.rubric_text = generated_text
-                        st.session_state.rubric_editor = generated_text
+                        st.session_state.rubric_text = text
+                        st.session_state.rubric_editor = text
+                        st.session_state.rubric_notice = (
+                            (
+                                "warn",
+                                "The Google model could not be reached, so a standard "
+                                f"template rubric was used. Reason: {problem}",
+                            )
+                            if problem
+                            else None
+                        )
                     except PipelineError as exc:
-                        st.error(str(exc))
+                        st.session_state.rubric_notice = ("error", str(exc))
 
         rubric_text = st.text_area(
-            "Rubric - editable by teacher",
-            value=st.session_state.rubric_text,
-            height=220,
-            placeholder="Click Generate rubric with AI after entering the assignment prompt.",
+            "Rubric",
+            height=230,
+            placeholder="Four criteria, each with a weight, totalling 100. Generate one from the prompt or write your own.",
             key="rubric_editor",
         )
         st.session_state.rubric_text = rubric_text
 
+        notice = st.session_state.rubric_notice
+        if notice:
+            note(notice[1], notice[0])
         if st.session_state.generated_rubric:
-            generated = RubricDecomposition.model_validate(st.session_state.generated_rubric)
+            g = RubricDecomposition.model_validate(st.session_state.generated_rubric)
             st.caption(
-                f"Detected type: {generated.assignment_type}  "
-                f"{len(generated.criteria)} criteria  "
-                f"{sum(c.max_score for c in generated.criteria):g}/100"
+                f"{g.assignment_type}, {len(g.criteria)} criteria, "
+                f"{sum(c.max_score for c in g.criteria):g} marks"
             )
 
-    st.subheader("Student submission")
-    text_col, image_col = st.columns([1.25, 0.75])
+    section(
+        "Student submission",
+        "Paste the answer, or upload a photo of handwritten work and it will be transcribed first.",
+    )
+    text_col, image_col = st.columns([1.25, 0.75], gap="large")
     with text_col:
         typed_submission = st.text_area(
-            "Paste student response",
+            "Typed response",
             height=250,
-            placeholder="Paste the student's answer here, or upload a handwritten/printed image.",
+            placeholder="Paste the student's answer here.",
         )
     with image_col:
         image_file = st.file_uploader(
-            "Upload answer image",
+            "Image of the answer",
             type=["png", "jpg", "jpeg", "webp"],
-            help="Gemini multimodal intake transcribes the image before grading.",
             key="answer_image",
         )
         if image_file:
-            st.image(image_file, caption="Submission image", use_container_width=True)
+            st.image(image_file, use_container_width=True)
 
+    section("Marking")
+    track_slot = st.empty()
+    log_slot = st.empty()
+    with track_slot.container():
+        render_track()
 
-    st.markdown("### Live agent pipeline")
-    pipeline_placeholder = st.empty()
-    log_placeholder = st.empty()
-
-    with pipeline_placeholder.container():
-        render_pipeline()
-
-    run_clicked = st.button(
-        " Run multi-agent assessment",
-        type="primary",
-        use_container_width=True,
-    )
+    run_clicked = st.button("Run assessment", type="primary")
 
     if run_clicked:
-        st.session_state.events = []
-        st.session_state.active_step = "intake"
-        st.session_state.pipeline_halted = False
-        st.session_state.result = None
-        st.session_state.approved_report = None
-
-        def event_callback(step: str, message: str):
-            st.session_state.active_step = step
-            st.session_state.events.append({"step": step, "message": message})
-            with pipeline_placeholder.container():
-                render_pipeline()
-            with log_placeholder.container():
-                for event in st.session_state.events:
-                    st.markdown(f"**{event['step'].title()}**  {event['message']}")
-
-        image_bytes = image_file.getvalue() if image_file else None
-        image_mime = image_file.type if image_file else None
+        problems = []
         if not student_name.strip():
-            st.error("Please enter the student name.")
-            st.stop()
-
+            problems.append("Enter the student name.")
         if not assignment_title.strip():
-            st.error("Please enter the assignment title.")
-            st.stop()
+            problems.append("Enter the assignment title.")
+        if not effective_prompt.strip():
+            problems.append("Add an assignment prompt.")
+        if not rubric_text.strip():
+            problems.append("Add a rubric, or generate one from the prompt.")
+        if not typed_submission.strip() and not image_file:
+            problems.append("Add the student's answer as text or an image.")
 
-        student_id = database.add_student(student_name.strip())
+        if problems:
+            note(" ".join(problems), "error", "Cannot start yet")
+        else:
+            st.session_state.events = []
+            st.session_state.active_step = "intake"
+            st.session_state.pipeline_halted = False
+            st.session_state.result = None
+            st.session_state.approved_report = None
 
-        assignment_id = database.add_assignment(
-            title=assignment_title.strip(),
-            prompt=effective_prompt,
-            rubric=rubric_text.strip(),
-            assignment_type="Essay",
-        )
-        try:
-            with st.spinner("Agents are working..."):
-                result = run_pipeline(
-                    assignment_prompt=effective_prompt,
-                    rubric_text=rubric_text,
-                    typed_submission=typed_submission,
+            def event_callback(step: str, message: str):
+                st.session_state.active_step = step
+                st.session_state.events.append({"step": step, "message": message})
+                with track_slot.container():
+                    render_track()
+                render_log(log_slot)
+
+            image_bytes = image_file.getvalue() if image_file else None
+            image_mime = image_file.type if image_file else None
+
+            detected_type = (st.session_state.generated_rubric or {}).get(
+                "assignment_type", "Essay"
+            )
+
+            try:
+                student_id = database.add_student(student_name.strip())
+                assignment_id = database.add_assignment(
+                    title=assignment_title.strip(),
+                    prompt=effective_prompt,
+                    rubric_text=rubric_text.strip(),
+                    assignment_type=detected_type,
+                )
+                with st.spinner("Marking in progress"):
+                    result = run_pipeline(
+                        assignment_prompt=effective_prompt,
+                        rubric_text=rubric_text,
+                        typed_submission=typed_submission,
+                        student_id=student_id,
+                        assignment_id=assignment_id,
+                        image_bytes=image_bytes,
+                        image_mime_type=image_mime,
+                        google_api_key=google_key,
+                        groq_api_key=groq_key,
+                        event_callback=event_callback,
+                    )
+                st.session_state.assessment_id = database.save_assessment(
                     student_id=student_id,
                     assignment_id=assignment_id,
-                    image_bytes=image_bytes,
-                    image_mime_type=image_mime,
-                    google_api_key=google_key,
-                    groq_api_key=groq_key,
-                    event_callback=event_callback,
+                    submission_content=result.submission_text,
+                    pipeline_result=result,
                 )
-            assessment_id = database.save_assessment(
-                student_id=student_id,
-                assignment_id=assignment_id,
-                submission_content=result.submission_text,
-                pipeline_result=result,
-
-      )       
-
-            st.session_state.result = result.model_dump()
-            st.session_state.assessment_id = assessment_id
-            st.session_state.pipeline_halted = result.status == "halted_for_review"
-            st.session_state.active_step = None
-            with pipeline_placeholder.container():
-                render_pipeline()
-        except PipelineError as exc:
-            st.session_state.active_step = None
-            st.error(str(exc))
-        except Exception as exc:
-            st.session_state.active_step = None
-            st.error(f"Unexpected application error: {exc}")
+                st.session_state.result = result.model_dump()
+                st.session_state.pipeline_halted = result.status == "halted_for_review"
+                st.session_state.active_step = None
+                with track_slot.container():
+                    render_track()
+            except PipelineError as exc:
+                st.session_state.active_step = None
+                note(str(exc), "error", "The assessment stopped")
+            except Exception as exc:  # noqa: BLE001
+                st.session_state.active_step = None
+                note(f"{type(exc).__name__}: {exc}", "error", "Unexpected error")
 
     raw_result = st.session_state.result
     if raw_result:
         result = PipelineResult.model_validate(raw_result)
 
-        st.divider()
-        st.subheader("Teacher audit queue")
+        section(
+            "Teacher review",
+            "Adjust any score or wording. The student sees only what you approve.",
+        )
 
         if result.status == "halted_for_review":
-            st.markdown(
-                f"""
-<div class="alert-card">
-  <div class="smallcaps">Manual review required</div>
-  <h3 style="margin:.3rem 0">Automated scoring was halted</h3>
-  <p><b>Severity:</b> {result.anomaly.severity.title()}</p>
-  <p>{result.anomaly.teacher_note}</p>
-</div>
-""",
-                unsafe_allow_html=True,
+            note(
+                result.anomaly.teacher_note,
+                "warn",
+                f"Automatic scoring stopped. Severity: {result.anomaly.severity}.",
             )
             if result.anomaly.reasons:
-                st.write("**Why it was routed:**")
-                for reason in result.anomaly.reasons:
-                    st.write(f" {reason}")
-            st.info(
-                "This is intentionally a routing decision, not a plagiarism verdict. "
-                "The anomaly model has no external plagiarism corpus."
+                plain_list(result.anomaly.reasons)
+            st.caption(
+                "This is a routing decision, not a finding of plagiarism. "
+                "The check has no external plagiarism database."
             )
         else:
-            st.success("Draft grading complete. Teacher approval is required before publication.")
-
-            st.markdown("#### Rubric decomposition")
-            for criterion in result.rubric.criteria:
-                with st.expander(f"{criterion.name}  {criterion.max_score} points"):
-                    st.write(criterion.description)
-                    for indicator in criterion.success_indicators:
-                        st.write(f" {indicator}")
-
-            st.markdown("#### Agent-generated scores  editable by teacher")
+            limits = {c.name: c.max_score for c in result.rubric.criteria}
             edited_scores = []
+
             for score in result.scores:
-                with st.container(border=True):
-                    c1, c2 = st.columns([0.25, 0.75])
-                    with c1:
-                        edited = st.number_input(
-                            f"{score.criterion} score",
-                            min_value=0.0,
-                            max_value=float(next(c.max_score for c in result.rubric.criteria if c.name == score.criterion)),
-                            value=float(score.score),
-                            step=0.5,
-                            key=f"edit_score_{score.criterion}",
-                        )
-                    with c2:
-                        st.markdown(compliance_badge(score.compliance), unsafe_allow_html=True)
-                        st.write(score.rationale)
-                        st.caption(f"Agent improvement: {score.improvement}")
-                    edited_scores.append((score.criterion, edited))
+                max_score = float(limits[score.criterion])
+                info, field = st.columns([1.6, 1], gap="large")
+                with info:
+                    st.markdown(
+                        f'<div class="review-head">{esc(score.criterion)}</div>'
+                        f'<div class="review-meta">{esc(score.compliance)}, out of {fmt(max_score)}</div>'
+                        f'<p class="review-text">{esc(score.rationale)}</p>'
+                        f'<p class="review-fix">Suggested improvement: {esc(score.improvement)}</p>',
+                        unsafe_allow_html=True,
+                    )
+                with field:
+                    edited = st.number_input(
+                        "Score",
+                        min_value=0.0,
+                        max_value=max_score,
+                        value=min(float(score.score), max_score),
+                        step=0.5,
+                        key=f"edit_score_{score.criterion}",
+                    )
+                edited_scores.append((score.criterion, edited))
+                st.markdown(
+                    '<div style="border-bottom:1px solid var(--rule);margin:.6rem 0 1rem"></div>',
+                    unsafe_allow_html=True,
+                )
 
             feedback = result.feedback
             if feedback:
                 summary_edit = st.text_area(
-                    "Overall feedback  teacher editable",
+                    "Overall feedback for the student",
                     value=feedback.summary,
                     height=130,
                     key="summary_edit",
                 )
                 next_steps_edit = st.text_area(
-                    "Next steps  one item per line",
+                    "Next steps, one per line",
                     value="\n".join(feedback.next_steps),
                     height=120,
                     key="steps_edit",
                 )
                 teacher_note = st.text_area(
-                    "Private teacher audit note",
+                    "Private note for your records",
                     value=feedback.teacher_audit_note,
                     height=100,
                     key="audit_edit",
                 )
 
                 total_after_edits = round(sum(v for _, v in edited_scores), 2)
-                st.metric("Teacher-adjusted total", f"{total_after_edits:.1f} / 100")
+                st.markdown(
+                    f'<div class="total">{fmt(total_after_edits)}<small> / 100 after your adjustments</small></div>',
+                    unsafe_allow_html=True,
+                )
 
-                if st.button(" Approve and publish student report", type="primary"):
+                if st.button("Approve and publish report", type="primary"):
                     approved = deepcopy(result.model_dump())
                     score_map = dict(edited_scores)
                     for item in approved["scores"]:
@@ -555,17 +718,10 @@ with teacher_tab:
                         if line.strip()
                     ]
                     approved["feedback"]["teacher_audit_note"] = teacher_note.strip()
-                    approved["feedback"]["overall_level"] = (
-                        "Excellent"
-                        if total_after_edits >= 90
-                        else "Proficient"
-                        if total_after_edits >= 75
-                        else "Developing"
-                        if total_after_edits >= 60
-                        else "Beginning"
-                    )
+                    approved["feedback"]["overall_level"] = level_for(total_after_edits)
                     approved["teacher_approved"] = True
                     st.session_state.approved_report = approved
+
                     database.approve_assessment(
                         assessment_id=st.session_state.assessment_id,
                         edited_scores=edited_scores,
@@ -575,358 +731,177 @@ with teacher_tab:
                         next_steps=approved["feedback"]["next_steps"],
                         teacher_audit_note=teacher_note.strip(),
                     )
-                    vector_db.add_assessment(
-                        assessment_id=st.session_state.assessment_id,
-                        assignment_prompt=effective_prompt,
-                        assignment_type=result.rubric.assignment_type,
-                        rubric=rubric_text,
-                        submission=result.submission_text,
-                        feedback=summary_edit.strip(),
+                    note(
+                        "The Student report tab now shows the approved version.",
+                        "good",
+                        "Report published",
                     )
-                    st.success("Published. The Student Report tab now shows the approved version.")
+                    try:
+                        import vector_db
 
-            with st.expander("Audit trail / raw structured result"):
-                st.json(result.model_dump())
+                        vector_db.add_assessment(
+                            assessment_id=st.session_state.assessment_id,
+                            assignment_prompt=effective_prompt,
+                            assignment_type=result.rubric.assignment_type,
+                            rubric=rubric_text,
+                            submission=result.submission_text,
+                            feedback=summary_edit.strip(),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        note(
+                            f"The report was saved, but it could not be added to search. {exc}",
+                            "warn",
+                        )
 
-with student_tab:
+        with st.expander("Full structured result"):
+            st.json(result.model_dump())
+
+# ================================================================ STUDENT REPORT
+with report_tab:
     approved = st.session_state.approved_report
     draft = st.session_state.result
 
+    report = None
     if approved:
         report = approved
-        st.success("Teacher-approved report")
+        note("Approved by the teacher.", "good")
     elif draft and draft.get("status") == "awaiting_teacher_review":
         report = draft
-        st.warning("Preview only  this draft has not yet been approved by the teacher.")
+        note(
+            "This is a draft. The teacher has not approved it yet, so students should not see it.",
+            "warn",
+            "Preview",
+        )
     elif draft and draft.get("status") == "halted_for_review":
-        report = None
-        st.warning("This submission has been routed to the teacher for manual review.")
+        note(
+            "This submission was sent to the teacher for manual review before any scoring.",
+            "warn",
+        )
     else:
-        report = None
-        st.info("Run an assessment in the Teacher Console to generate a student report.")
-
-    if report and report.get("feedback"):
-        feedback = report["feedback"]
-        scores = report["scores"]
-
-        top1, top2, top3 = st.columns([1.15, 1, 1])
-        with top1:
-            st.markdown(
-                f"""
-<div class="score-card">
-  <div class="smallcaps">Overall score</div>
-  <div class="score-big">{feedback['total_score']:.1f}<span style="font-size:1rem;color:#738197"> / 100</span></div>
-  <div style="margin-top:8px"><b>{feedback['overall_level']}</b></div>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-        with top2:
-            strongest = max(scores, key=lambda x: x["score"])
-            st.metric(
-                "Strongest criterion",
-                strongest["criterion"],
-                f"{strongest['score']:.1f}/{next(c.max_score for c in result.rubric.criteria if c.name == strongest['criterion']):g}",
-            )
-        with top3:
-            growth = min(scores, key=lambda x: x["score"])
-            st.metric(
-                "Growth focus",
-                growth["criterion"],
-                f"{growth['score']:.1f}/{next(c.max_score for c in result.rubric.criteria if c.name == growth['criterion']):g}",
-            )
-
-        st.markdown("### Criterion breakdown")
-        cols = st.columns(4)
-        for col, score in zip(cols, scores):
-            with col:
-                st.markdown(
-                    f"""
-<div class="score-card">
-  <div class="smallcaps">{score['criterion']}</div>
-  <div style="font-size:1.9rem;font-weight:800;color:#294f72;margin:.25rem 0">
-    {score['score']:.1f}<span style="font-size:.85rem;color:#738197"> / 25</span>
-  </div>
-  {compliance_badge(score['compliance'])}
-  <p style="font-size:.9rem;margin-top:12px">{score['improvement']}</p>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-
-        st.markdown("### Your feedback")
         st.markdown(
-            f"""
-<div class="report-card">
-  <h3 style="margin-top:0">Overall</h3>
-  <p>{feedback['summary']}</p>
-</div>
-""",
+            '<div class="empty"><div class="h">No report yet</div>'
+            "Run an assessment on the Grade tab. The report appears here once it is ready.</div>",
             unsafe_allow_html=True,
         )
 
-        a, b = st.columns(2)
-        with a:
-            st.markdown("#### What you did well")
-            for item in feedback["strengths"]:
-                st.success(item)
-        with b:
-            st.markdown("#### Highest-impact growth areas")
-            for item in feedback["growth_priorities"]:
-                st.warning(item)
+    if report and report.get("feedback"):
+        render_report(report)
 
-        st.markdown("#### Next attempt: action plan")
-        for index, item in enumerate(feedback["next_steps"], start=1):
-            st.write(f"**{index}.** {item}")
-
-        with st.expander("Why did I receive these scores?"):
-            for score in scores:
-                st.markdown(f"**{score['criterion']}  {score['score']:.1f}/25**")
-                st.write(score["rationale"])
-                if score.get("evidence_from_submission"):
-                    st.caption("Evidence considered: " + "  ".join(score["evidence_from_submission"]))
-
-
-with history_tab:
-
-    st.header("Previous Submissions")
-    st.divider()
-
-st.subheader("AI Semantic Search")
-
-st.caption(
-    "Search previous assessments using natural language."
-)
-
-semantic_query = st.text_input(
-    "What are you looking for?",
-    placeholder="Example: Find essays about remote work and productivity",
-    key="semantic_query"
-)
-
-semantic_search_clicked = st.button(
-    "Search Similar Assessments",
-    type="primary",
-    use_container_width=True
-)
-
-if semantic_search_clicked:
-
-    if not semantic_query.strip():
-
-        st.warning("Please enter something to search.")
-
-    else:
-
-        with st.spinner("Searching similar assessments..."):
-
-            matches = vector_db.search_similar(
-                query=semantic_query.strip(),
-                n_results=5,
-                max_distance=1.5,
-            )
-
-        if not matches:
-
-            st.info(
-                "No sufficiently similar assessments found."
-            )
-
-        else:
-
-            st.success(
-                f"Found {len(matches)} similar assessment(s)"
-            )
-
-            for index, match in enumerate(matches, start=1):
-
-                metadata = match["metadata"]
-                distance = match["distance"]
-                document = match["document"]
-
-                assessment_id = metadata.get(
-                    "assessment_id",
-                    "Unknown"
-                )
-
-                assignment_type = metadata.get(
-                    "assignment_type",
-                    "Unknown"
-                )
-
-                with st.expander(
-                    f"Result {index} — Assessment #{assessment_id}"
-                ):
-
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.metric(
-                            "Assignment Type",
-                            assignment_type
-                        )
-
-                    with col2:
-                        st.metric(
-                            "Similarity Distance",
-                            f"{distance:.4f}"
-                        )
-
-                    st.markdown("### Assessment Content")
-
-                    st.text(document)
+# ================================================================ ARCHIVE
+with archive_tab:
+    section("Previous assessments", first=True)
 
     history = database.get_assessment_history()
 
     if not history:
-        st.info("No previous assessments found.")
-
+        st.markdown(
+            '<div class="empty"><div class="h">Nothing archived yet</div>'
+            "Completed assessments are stored here so you can find and review them later.</div>",
+            unsafe_allow_html=True,
+        )
     else:
-
-        st.caption(
-            f"{len(history)} assessment(s) found in the database."
-        )
-
         search_name = st.text_input(
-            "Search by student or assignment",
-            placeholder="Enter student name or assignment title"
+            "Filter by student or assignment", placeholder="Name or title"
         )
-
-        filtered_history = history
-
+        rows = history
         if search_name.strip():
-
-            query = search_name.lower()
-
-            filtered_history = [
-                item
-                for item in history
-                if query in item["student_name"].lower()
-                or query in item["assignment_title"].lower()
+            q = search_name.lower()
+            rows = [
+                i
+                for i in history
+                if q in i["student_name"].lower() or q in i["assignment_title"].lower()
             ]
 
-        for item in filtered_history:
-
-            title = (
-                f"#{item['assessment_id']} — "
-                f"{item['student_name']} | "
-                f"{item['assignment_title']}"
-            )
-
-            with st.expander(title):
-
-                col1, col2, col3 = st.columns(3)
-
-                with col1:
-                    st.metric(
-                        "Status",
-                        item["status"]
-                    )
-
-                with col2:
-                    score = (
-                        item["teacher_score"]
-                        or item["ai_score"]
-                    )
-
-                    if score is not None:
-                        st.metric(
-                            "Score",
-                            f"{score:.1f}/100"
-                        )
-                    else:
-                        st.metric(
-                            "Score",
-                            "Pending"
-                        )
-
-                with col3:
-                    st.write(
-                        "Created:",
-                        item["created_at"]
-                    )
-
-                if st.button(
-                    "View Full Assessment",
-                    key=f"view_{item['assessment_id']}"
-                ):
-
-                    details = database.get_assessment_details(
-                        item["assessment_id"]
-                    )
-
-                    st.session_state.selected_history = details
-
-
-        selected = st.session_state.get(
-            "selected_history"
+        st.caption(f"{len(rows)} of {len(history)} assessments")
+        st.markdown(
+            '<div class="arch-head"><div>No.</div><div>Student</div><div>Assignment</div>'
+            "<div>Status</div><div>Score</div><div>Date</div></div>",
+            unsafe_allow_html=True,
         )
-
-        if selected:
-
-            st.divider()
-
-            st.subheader(
-                f"Assessment #{selected['assessment_id']}"
+        for item in rows:
+            score = (
+                item["teacher_score"]
+                if item["teacher_score"] is not None
+                else item["ai_score"]
             )
-
-            st.write(
-                f"### Student: {selected['student_name']}"
+            st.markdown(
+                '<div class="arch-row">'
+                f'<div class="n">{esc(item["assessment_id"])}</div>'
+                f'<div>{esc(item["student_name"])}</div>'
+                f'<div>{esc(item["assignment_title"])}</div>'
+                f'<div>{esc(STATUS_LABELS.get(item["status"], str(item["status"]).replace("_", " ").capitalize()))}</div>'
+                f'<div>{fmt(score) + " / 100" if score is not None else "Pending"}</div>'
+                f'<div>{esc(str(item["created_at"])[:16].replace("T", " "))}</div></div>',
+                unsafe_allow_html=True,
             )
-
-            st.write(
-                f"### Assignment: {selected['assignment_title']}"
-            )
-
-            st.write("### Assignment Prompt")
-
-            st.info(selected["prompt"])
-
-            st.write("### Student Submission")
-
-            st.text_area(
-                "Submission",
-                value=selected["submission_content"],
-                height=250,
-                disabled=True,
-                key=f"history_submission_{selected['assessment_id']}"
-            )
-
-            st.write("### Criterion Scores")
-
-            for score in selected["scores"]:
-
-                with st.expander(
-                    f"{score['criterion_name']} — "
-                    f"{score['score']}/{score['max_score']}"
-                ):
-
-                    st.write(
-                        "**Compliance:**",
-                        score["compliance"]
-                    )
-
-                    st.write(
-                        "**Rationale:**",
-                        score["rationale"]
-                    )
-
-                    st.write(
-                        "**Improvement:**",
-                        score["improvement"]
-                    )
-
-            if selected["feedback"]:
-
-                feedback = selected["feedback"]
-
-                st.write("### Feedback")
-
-                st.success(
-                    f"{feedback['total_score']}/100 — "
-                    f"{feedback['overall_level']}"
+            if st.button("Open", key=f"view_{item['assessment_id']}"):
+                st.session_state.selected_history = database.get_assessment_details(
+                    item["assessment_id"]
                 )
 
-                st.write(feedback["summary"])
+        selected = st.session_state.selected_history
+        if selected:
+            section(
+                f"Assessment {selected['assessment_id']}",
+                f"{selected['student_name']}, {selected['assignment_title']}",
+            )
+            with st.expander("Assignment prompt"):
+                st.write(selected["prompt"])
+            with st.expander("Student submission"):
+                st.write(selected["submission_content"])
 
+            if selected["scores"]:
+                render_ledger(
+                    [
+                        {
+                            "criterion": s["criterion_name"],
+                            "score": s["score"],
+                            "max_score": s["max_score"],
+                            "compliance": s["compliance"],
+                            "rationale": s["rationale"],
+                        }
+                        for s in selected["scores"]
+                    ],
+                    with_detail=True,
+                )
+            fb = selected["feedback"]
+            if fb:
+                st.markdown(
+                    f'<div class="sub">{fmt(fb["total_score"])} / 100, {esc(fb["overall_level"])}</div>'
+                    f'<p>{esc(fb["summary"])}</p>',
+                    unsafe_allow_html=True,
+                )
 
+    section(
+        "Search by meaning",
+        "Find earlier assessments by topic, for example essays about remote work.",
+    )
+    semantic_query = st.text_input(
+        "Describe what you are looking for", key="semantic_query"
+    )
+    if st.button("Search"):
+        if not semantic_query.strip():
+            note("Type a few words describing what you want to find.", "warn")
+        else:
+            try:
+                import vector_db
+
+                with st.spinner("Searching"):
+                    matches = vector_db.search_similar(
+                        query=semantic_query.strip(), n_results=5, max_distance=1.5
+                    )
+            except Exception as exc:  # noqa: BLE001
+                matches = None
+                note(f"Search is unavailable right now. {exc}", "error")
+
+            if matches is not None:
+                if not matches:
+                    note("No close matches. Try different words.")
+                for match in matches:
+                    meta = match["metadata"]
+                    with st.expander(
+                        f"Assessment {meta.get('assessment_id', '?')}, "
+                        f"{meta.get('assignment_type', 'Unknown')}"
+                    ):
+                        st.caption(f"Distance {match['distance']:.3f}. Lower is closer.")
+                        st.text(match["document"])

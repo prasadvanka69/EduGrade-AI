@@ -6,7 +6,7 @@ We built EduGrade AI to change that. It's an agentic grading assistant that brea
 
 Most importantly, it keeps a human teacher in the loop—the AI does the heavy lifting, but the teacher has the final say before anything is saved or sent to students.
 
-🔗 Live Demo: edugrade-ai.streamlit.app
+Live Demo: edugrade-ai.streamlit.app
 
 How it Works (Under the Hood) :
     Instead of passing the whole essay and rubric to a single prompt (which makes LLMs hallucinate or miss details), we break the work down among 5 specialized agents that run step-by-step:
@@ -16,7 +16,7 @@ Anomaly Agent: Runs in parallel to catch bad files, blank pages, plagiarized tex
 Criterion Scorer: Evaluates the submission against each criteria individually. It runs these evaluations in parallel to keep things fast.
 Feedback Synthesizer: Takes the individual scores and compiles them into a clear, supportive feedback block for the student, explaining exactly where they lost points and how to fix it.
 
-💾 The Data Stack: Why SQLite & ChromaDB? (And why not MongoDB?)
+The Data Stack: Why SQLite & ChromaDB? (And why not MongoDB?)
 If you're wondering why we didn't just use MongoDB like every other hackathon project, here is the engineering breakdown of our choices:
 
 SQLite — Our System of Record
@@ -29,7 +29,7 @@ Consistency via Few-Shot RAG: If you grade 100 essays with raw LLMs, they will d
 Copy-Paste Protection: 
             ChromaDB does semantic-similarity checks across all submissions. If two students submit papers that are worded differently but have 95% identical meanings, the Anomaly Agent flags it instantly.
 
-📂 File Layout
+File Layout
 app.py: Streamlit frontend with a "Teacher Console" (state manager) and "Student View".
 pipeline.py: The core state-machine orchestrating the 5 agents.
 database.py: SQLite schemas and SQL query logic.
@@ -38,7 +38,7 @@ index_existing_data.py: Pre-loads historical essay exemplars into the vector sto
 .agents/skills / .claude/skills: Prompt directive libraries.
 .devcontainer/: Simple configuration for instant cloud dev environments.
 
-⚙️ Local Setup
+Local Setup
 Get it running locally in under 2 minutes:
 
 # 1. Clone & Enter
@@ -56,11 +56,21 @@ pip install -r requirements.txt
 # 4. Environment Variables
 # Copy the example file and fill in your API keys
 cp .env.example .env
-Open .env and paste your keys:
+Open .env and paste your keys (see .env.example), then start the app with:
+
+    streamlit run app.py
 
 GOOGLE_API_KEY=your_gemini_key
 GROQ_API_KEY=your_groq_key
 
 Launch
 streamlit run app.py
-⚠️ Note: We updated the project to use current, active LLM endpoints configurable in your .env. No legacy or retired API dependencies!
+Note: We updated the project to use current, active LLM endpoints configurable in your .env. No legacy or retired API dependencies!
+
+
+## Notes on API handling
+
+- Transient errors (rate limits, timeouts, 5xx) are retried with backoff.
+- If a configured model is unavailable, the app tries a fallback (gemini-2.5-flash, llama-3.3-70b-versatile).
+- Reasoning models get enough completion tokens to finish their answer, and JSON is extracted even if wrapped in prose or code fences.
+- Rubric weights that miss 100 are rescaled. If rubric generation fails, the teacher sees the reason and a standard template is used, instead of failing silently.

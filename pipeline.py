@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 
 
-import database
 import json
 import os
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Callable, Literal, Optional
@@ -30,8 +31,72 @@ GROQ_ANOMALY_MODEL = os.getenv(
     "openai/gpt-oss-20b"
 )
 
+# Models tried in order when the configured one is unavailable for the account.
+GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash"]
+GROQ_FALLBACK_MODELS = ["llama-3.3-70b-versatile"]
+
+MAX_ATTEMPTS = 3
+
+
 class PipelineError(RuntimeError):
     """Human-readable pipeline failure."""
+
+
+def _is_transient(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "429", "rate limit", "rate_limit", "quota", "resource_exhausted",
+            "500", "502", "503", "504", "unavailable", "overloaded",
+            "timeout", "timed out", "connection",
+        )
+    )
+
+
+def _is_missing_model(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return (
+        "404" in text
+        or "not found" in text
+        or "does not exist" in text
+        or "model_not_found" in text
+        or "decommissioned" in text
+    )
+
+
+def _with_models(primary: str, fallbacks: list[str], call: Callable[[str], object]):
+    """Run call(model) with retries on transient errors, then try fallback models."""
+    last_exc: Exception | None = None
+    for model in [primary, *[m for m in fallbacks if m != primary]]:
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                return call(model)
+            except Exception as exc:  # noqa: BLE001 - SDKs raise many types
+                last_exc = exc
+                if _is_missing_model(exc):
+                    break  # move on to the next model
+                if _is_transient(exc) and attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(1.5 * (2 ** attempt))
+                    continue
+                raise
+    assert last_exc is not None
+    raise last_exc
+
+
+def _extract_json_object(text: str) -> dict:
+    """Parse the first JSON object in text, tolerating fences and stray prose."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
 
 
 class RubricCriterion(BaseModel):
@@ -77,21 +142,27 @@ class RubricDecomposition(BaseModel):
                 "Each criterion score must be positive"
             )
 
-        total = round(
-            sum(c.max_score for c in value),
-            2,
-        )
+        total = sum(c.max_score for c in value)
 
-        if total != 100:
-            raise ValueError(
-                f"Total rubric score must equal 100, got {total}"
-            )
+        # Models often return weights that are close to, but not exactly, 100.
+        # Rescale instead of rejecting the whole rubric.
+        if round(total, 2) != 100:
+            scaled = [round(c.max_score * 100 / total) for c in value]
+            scaled[-1] += 100 - sum(scaled)
+            if scaled[-1] <= 0:
+                raise ValueError(
+                    f"Total rubric score must equal 100, got {round(total, 2)}"
+                )
+            value = [
+                c.model_copy(update={"max_score": float(w)})
+                for c, w in zip(value, scaled)
+            ]
 
         return value
 
 
 class AnomalyResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     flagged: bool
     severity: Literal["none", "low", "medium", "high"]
     should_halt: bool
@@ -108,7 +179,7 @@ class AnomalyResult(BaseModel):
     teacher_note: str
 
 class CriterionScore(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     criterion: str = Field(min_length=2, max_length=80)
 
@@ -123,15 +194,19 @@ class CriterionScore(BaseModel):
 
     evidence_from_submission: list[str] = Field(
         default_factory=list,
-        max_length=4,
     )
+
+    @field_validator("evidence_from_submission", mode="after")
+    @classmethod
+    def _trim_evidence(cls, value: list[str]) -> list[str]:
+        return value[:4]
 
     rationale: str = Field(min_length=15)
 
     improvement: str = Field(min_length=10)
 
 class FeedbackReport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     total_score: float = Field(ge=0, le=100)
     overall_level: Literal["Excellent", "Proficient", "Developing", "Beginning"]
     summary: str = Field(min_length=25)
@@ -178,8 +253,8 @@ def _build_clients(google_api_key: str, groq_api_key: str):
         )
 
     # Uses the official SDK patterns requested.
-    google_client = genai.Client()
-    groq_client = Groq()
+    google_client = genai.Client(http_options=types.HttpOptions(timeout=60000))
+    groq_client = Groq(timeout=60.0)
     return google_client, groq_client
 
 
@@ -210,9 +285,13 @@ def _gemini_extract_submission(
                 f"{typed_text}"
             )
 
-        response = google_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[image_part, prompt],
+        response = _with_models(
+            GEMINI_MODEL,
+            GEMINI_FALLBACK_MODELS,
+            lambda model: google_client.models.generate_content(
+                model=model,
+                contents=[image_part, prompt],
+            ),
         )
         text = (response.text or "").strip()
         if not text:
@@ -343,20 +422,27 @@ Important rules:
 """
 
     try:
-        response = google_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=RubricDecomposition,
-                temperature=0.2,
+        response = _with_models(
+            GEMINI_MODEL,
+            GEMINI_FALLBACK_MODELS,
+            lambda model: google_client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=RubricDecomposition,
+                    temperature=0.2,
+                ),
             ),
         )
 
-        if response.parsed:
-            return response.parsed
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, RubricDecomposition):
+            return parsed
 
-        return RubricDecomposition.model_validate_json(response.text)
+        return RubricDecomposition.model_validate(
+            _extract_json_object(response.text)
+        )
 
     except (ValidationError, ValueError, TypeError) as exc:
         raise PipelineError(
@@ -369,34 +455,53 @@ Important rules:
         ) from exc
 
 def _groq_json(groq_client, model: str, system: str, user: str) -> dict:
-    try:
-        completion = groq_client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        system
-                        + "\n\nIMPORTANT: Return ONLY one valid JSON object. "
-                          "Do not use markdown, code fences, explanations, "
-                          "or reasoning outside the JSON object."
-                    ),
-                },
-                {"role": "user", "content": user},
-            ],
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                system
+                + "\n\nIMPORTANT: Return ONLY one valid JSON object. "
+                  "Do not use markdown, code fences, explanations, "
+                  "or reasoning outside the JSON object."
+            ),
+        },
+        {"role": "user", "content": user},
+    ]
+
+    def call(model_name: str):
+        # Reasoning models spend completion tokens on thinking; a small cap
+        # leaves the visible answer empty, so give them room and keep effort low.
+        kwargs: dict = dict(
+            model=model_name,
+            messages=messages,
             temperature=0.1,
-            max_tokens=2048,
+            max_completion_tokens=8192,
+            response_format={"type": "json_object"},
         )
+        if "gpt-oss" in model_name:
+            kwargs["reasoning_effort"] = "low"
+        try:
+            return groq_client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            text = str(exc).lower()
+            if "response_format" in text or "json_object" in text or "reasoning_effort" in text:
+                kwargs.pop("response_format", None)
+                kwargs.pop("reasoning_effort", None)
+                return groq_client.chat.completions.create(**kwargs)
+            raise
 
-        content = completion.choices[0].message.content or "{}"
-        content = content.strip()
+    try:
+        completion = _with_models(model, GROQ_FALLBACK_MODELS, call)
+        content = (completion.choices[0].message.content or "").strip()
+        if not content:
+            raise PipelineError(
+                f"{model} returned an empty response. Try again, or set a different "
+                "GROQ_SCORING_MODEL / GROQ_ANOMALY_MODEL in .env."
+            )
+        return _extract_json_object(content)
 
-        # Remove markdown code fences if a model adds them.
-        if content.startswith("```"):
-            content = content.replace("```json", "", 1)
-            content = content.replace("```", "", 1).strip()
-
-        return json.loads(content)
+    except PipelineError:
+        raise
 
     except json.JSONDecodeError as exc:
         raise PipelineError(
@@ -490,11 +595,9 @@ evidence from the submission. Give an actionable improvement suggestion.
     if result.criterion != criterion.name:
         result = result.model_copy(update={"criterion": criterion.name})
 
+    # A model occasionally overshoots the maximum; clamp rather than abort the run.
     if result.score > criterion.max_score:
-        raise PipelineError(
-            f"{criterion.name} score {result.score} exceeds "
-        f"maximum allowed score {criterion.max_score}"
-        )
+        result = result.model_copy(update={"score": float(criterion.max_score)})
 
     return result
 
@@ -574,7 +677,7 @@ def run_pipeline(
 
     google_client, groq_client = _build_clients(google_api_key, groq_api_key)
 
-    _emit(event_callback, "intake", "Phase 1 â€” ingesting submission")
+    _emit(event_callback, "intake", "Phase 1 - ingesting submission")
     try:
         submission_text = _gemini_extract_submission(
             google_client,
@@ -591,23 +694,33 @@ def run_pipeline(
     _emit(
         event_callback,
         "identify",
-        "Phases 2â€“3 â€” decomposing rubric and running anomaly screen in parallel",
+        "Phases 2 and 3: decomposing rubric and running anomaly screen in parallel",
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
         rubric_future = executor.submit(
-            generate_rubric, assignment_prompt, rubric_text, os.getenv("GOOGLE_API_KEY", "")
-     )
+            generate_rubric_with_status,
+            assignment_prompt,
+            rubric_text,
+            os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
+        )
         anomaly_future = executor.submit(
             _check_anomaly, groq_client, assignment_prompt, submission_text
         )
-        rubric = rubric_future.result()
+        rubric, rubric_problem = rubric_future.result()
         anomaly = anomaly_future.result()
+
+    if rubric_problem:
+        _emit(
+            event_callback,
+            "identify",
+            f"Rubric service unavailable, using a standard template instead: {rubric_problem}",
+        )
 
     _emit(event_callback, "identify", "Rubric converted into four isolated criteria")
     _emit(
         event_callback,
         "anomaly",
-        f"Anomaly screen complete â€” severity: {anomaly.severity}",
+        f"Anomaly screen complete - severity: {anomaly.severity}",
     )
 
     if anomaly.should_halt:
@@ -634,7 +747,7 @@ def run_pipeline(
     _emit(
         event_callback,
         "analyze",
-        "Phase 4 â€” launching four criterion graders in parallel",
+        "Phase 4 - launching four criterion graders in parallel",
     )
     scores_by_name: dict[str, CriterionScore] = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -658,18 +771,18 @@ def run_pipeline(
         for criterion in rubric.criteria
     ]
 
-    _emit(event_callback, "generate", "Phase 5 â€” synthesizing actionable feedback")
+    _emit(event_callback, "generate", "Phase 5 - synthesizing actionable feedback")
     feedback = _compile_feedback(groq_client, assignment_prompt, scores)
     _emit(
         event_callback,
         "generate",
-        f"Draft report generated â€” {feedback.total_score:.1f}/100",
+        f"Draft report generated - {feedback.total_score:.1f}/100",
     )
 
     _emit(
         event_callback,
         "approval",
-        "Phase 6 â€” routed to teacher queue for audit, editing, and approval",
+        "Phase 6 - routed to teacher queue for audit, editing, and approval",
     )
     return PipelineResult(
         submission_text=submission_text,
@@ -686,38 +799,49 @@ def run_pipeline(
         },
     )
 
-def generate_rubric(
+def generate_rubric_with_status(
     assignment_prompt: str,
     teacher_rubric: str = "",
     google_api_key: str = "",
-) -> RubricDecomposition:
+) -> tuple[RubricDecomposition, Optional[str]]:
+    """
+    Generate a rubric with Gemini. If the API call fails, return a standard
+    template rubric together with the reason, so the caller can tell the
+    teacher what happened instead of failing silently.
+    """
     if not assignment_prompt.strip():
         raise PipelineError("Assignment prompt is required before generating a rubric.")
 
     google_key = (
         google_api_key.strip()
         or os.getenv("GOOGLE_API_KEY", "").strip()
+        or os.getenv("GEMINI_API_KEY", "").strip()
     )
 
     if not google_key:
-        raise PipelineError("GOOGLE_API_KEY is missing.")
+        raise PipelineError(
+            "Missing Google API key. Set GOOGLE_API_KEY in .env or enter it under API keys."
+        )
 
     try:
         google_client = genai.Client(
             api_key=google_key,
-            http_options=types.HttpOptions(timeout=30000),
+            http_options=types.HttpOptions(timeout=60000),
         )
-
-        return _decompose_rubric(
-            google_client,
-            assignment_prompt,
-            teacher_rubric,
-        )
-
+        return _decompose_rubric(google_client, assignment_prompt, teacher_rubric), None
     except PipelineError as exc:
-        message = str(exc)
+        return _fallback_rubric(assignment_prompt, teacher_rubric), str(exc)
 
-        return _fallback_rubric(
-            assignment_prompt,
-            teacher_rubric,
-        )
+
+def generate_rubric(
+    assignment_prompt: str,
+    teacher_rubric: str = "",
+    google_api_key: str = "",
+    allow_fallback: bool = False,
+) -> RubricDecomposition:
+    rubric, problem = generate_rubric_with_status(
+        assignment_prompt, teacher_rubric, google_api_key
+    )
+    if problem and not allow_fallback:
+        raise PipelineError(problem)
+    return rubric
